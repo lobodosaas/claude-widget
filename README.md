@@ -36,6 +36,30 @@ atualização sozinho na próxima abertura.
 O instalador não é assinado, então o Windows SmartScreen pode avisar na primeira
 vez: **Mais informações → Executar assim mesmo**.
 
+## Linux
+
+Testado no KDE Plasma 6 (Wayland, CachyOS). Gere o AppImage e instale:
+
+```bash
+npm ci
+npm run dist:linux        # release/Claude-Widget-<versão>.AppImage
+tools/install-linux.sh    # ~/Applications, menu de apps, início com o sistema e regra do KWin
+```
+
+O que muda em relação ao Windows:
+
+- **Roda pelo XWayland.** No Wayland puro a janela não escolhe a própria posição
+  nem fica sempre no topo. O app se relança sozinho com `--ozone-platform=x11`
+  quando aberto sem a flag.
+- **Clique atravessa pela forma da janela** (`setShape`): só a ilha recebe clique.
+- **Fora da barra de tarefas pelo KWin.** O Electron não implementa
+  `skipTaskbar` no Linux; o instalador cria a regra `claude-widget-island` em
+  `~/.config/kwinrulesrc`. Em outro ambiente, a ilha aparece na barra de tarefas.
+- **Inicia com o sistema por padrão** (`~/.config/autostart/claude-widget.desktop`).
+  Desliga em **Iniciar com o sistema** na bandeja.
+- **Sem atualização automática**: rode `npm run dist:linux` e o instalador de novo.
+- **Antigravity fica de fora**: a credencial só é lida no Windows.
+
 ## Por que existe
 
 Os limites que importam são invisíveis até estourarem. A sessão de 5 h reinicia
@@ -209,8 +233,8 @@ eventos de mouse encaminhados.
 
 ## Limitações conhecidas
 
-- **Só Windows.** O Antigravity lê o Gerenciador de Credenciais do Windows e o
-  início automático usa a pasta Inicializar.
+- **Windows e Linux (KDE).** O Antigravity só funciona no Windows, onde lê o
+  Gerenciador de Credenciais. No Linux, ver [Linux](#linux).
 - **Qwen é estimativa local**, ver acima.
 - **Antigravity e ZCode usam endpoints internos** dos próprios apps. Se eles
   mudarem, a fonte vira erro sem derrubar as outras.
