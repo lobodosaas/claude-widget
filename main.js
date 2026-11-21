@@ -15,9 +15,27 @@ const qwencloud = require('./lib/qwencloud')
 const { UsageError } = require('./lib/usage')
 const windowState = require('./lib/window-state')
 const autostart = require('./lib/autostart')
+const { shapeRect, fitInside } = require('./lib/shape')
 const tokenUsage = require('./lib/token-usage')
 const { nextBackoff, BASE_MS: POLL_BASE_MS } = require('./lib/poll-policy')
 const demo = require('./lib/demo')
+
+// Linux: no Wayland a janela nao escolhe a propria posicao nem fica sempre no
+// topo. Pelo XWayland (X11) as duas coisas funcionam.
+// A plataforma e escolhida antes do main.js rodar (appendSwitch aqui chega
+// tarde e so os processos filhos viram X11), entao o app se relanca com a flag.
+// spawn destacado, nao app.relaunch: no AppImage o auxiliar do relaunch roda
+// de dentro do ponto de montagem, que some quando este processo sai.
+const LINUX = process.platform === 'linux'
+const NEEDS_X11 = LINUX && app.commandLine.getSwitchValue('ozone-platform') !== 'x11'
+if (NEEDS_X11) {
+  require('node:child_process').spawn(
+    process.env.APPIMAGE || process.execPath,
+    [...process.argv.slice(1), '--ozone-platform=x11'],
+    { detached: true, stdio: 'ignore' }
+  ).unref()
+  app.exit(0)
+}
 
 // Demonstracao: preferencias e cache em pasta propria, para nao sujar os de verdade.
 if (demo.enabled()) app.setPath('userData', path.join(app.getPath('temp'), 'claude-widget-demo'))
@@ -354,11 +372,19 @@ function combinedSeverity () {
   return 'ok'
 }
 
+// push() roda a cada segundo. Trocar o menu com ele aberto apaga os itens no
+// Linux (o menu sai pelo D-Bus), entao so troca o que de fato mudou.
+let trayKey = { sev: null, tip: null, menu: null }
 function updateTray () {
   if (!tray) return
-  tray.setImage(trayIcon(combinedSeverity()))
-  tray.setToolTip(trayTooltip())
-  tray.setContextMenu(buildMenu())
+  const sev = combinedSeverity()
+  if (sev !== trayKey.sev) tray.setImage(trayIcon(sev))
+  const tip = trayTooltip()
+  if (tip !== trayKey.tip) tray.setToolTip(tip)
+  const template = menuTemplate()
+  const menu = JSON.stringify(template)
+  if (menu !== trayKey.menu) tray.setContextMenu(Menu.buildFromTemplate(template))
+  trayKey = { sev, tip, menu }
 }
 
 function setAutostart (on) {
@@ -371,10 +397,10 @@ function setAutostart (on) {
   updateTray()
 }
 
-function buildMenu () {
+function menuTemplate () {
   const displays = screen.getAllDisplays()
   const current = targetDisplay()
-  return Menu.buildFromTemplate([
+  return [
     { label: win && win.isVisible() ? 'Ocultar' : 'Mostrar', click: toggleWindow },
     { label: 'Atualizar agora', click: () => refreshAll({ force: true }) },
     { type: 'separator' },
@@ -415,14 +441,14 @@ function buildMenu () {
       }))
     },
     {
-      label: 'Iniciar com o Windows',
+      label: LINUX ? 'Iniciar com o sistema' : 'Iniciar com o Windows',
       type: 'checkbox',
       checked: autostart.isOn(),
       click: item => setAutostart(item.checked)
     },
     { type: 'separator' },
     { label: 'Sair', click: () => { quitting = true; app.quit() } }
-  ])
+  ]
 }
 
 // ---------------------------------------------------------------- janela
@@ -445,9 +471,11 @@ const DOCK_SNAP = 90 // soltar a menos disso do topo central encaixa de volta la
 // orient: 'v' quando a ilha esta presa numa lateral (capsula vertical), 'h' no resto.
 function anchor () {
   const d = state.dock
-  if (!d) return { h: 'center', v: 'top', orient: 'h' }
-  return { h: d.h, v: d.v, orient: d.edge === 'left' || d.edge === 'right' ? 'v' : 'h' }
+  if (!d) return { h: 'center', v: 'top', orient: 'h', pad: edgePad }
+  return { h: d.h, v: d.v, orient: d.edge === 'left' || d.edge === 'right' ? 'v' : 'h', pad: edgePad }
 }
+
+let edgePad = INSET // folga real ate a borda lateral (ver fitInside)
 
 function placeWindow () {
   if (!win) return
@@ -470,6 +498,8 @@ function placeWindow () {
       y = d.y + INSET - h
     }
   }
+  edgePad = INSET
+  if (LINUX) ({ x, pad: edgePad } = fitInside(x, WIN_W, a.x, a.width, INSET))
   win.setBounds({ x: Math.round(x), y: Math.round(y), width: WIN_W, height: Math.round(h) })
   push()
 }
@@ -530,12 +560,34 @@ function dockFromDrop () {
 
 // Arrasto: a pilula segue o cursor pelo centro ate o renderer avisar que soltou.
 let dragTimer = null
+let dragSize = null // Linux: tamanho fixo da janela durante o arrasto
 function startDrag () {
   if (!win || dragTimer) return
+  // Linux: o gerenciador de janelas nao deixa a janela sair da area de
+  // trabalho, e com 660 px de altura a pilula nao descia alem do meio da tela.
+  // Durante o arrasto a janela encolhe para o tamanho da pilula; o renderer a
+  // desenha em (INSET, 0) e o placeWindow do endDrag devolve o tamanho cheio.
+  if (LINUX && islandRect) {
+    const b = win.getBounds()
+    dragSize = { width: Math.round(islandRect.w + INSET * 2), height: PILL_H + INSET }
+    win.setBounds({
+      x: Math.round(b.x + islandRect.x - INSET),
+      y: Math.round(b.y + islandRect.y),
+      ...dragSize
+    })
+    islandRect = { x: INSET, y: 0, w: islandRect.w, h: PILL_H }
+    edgePad = INSET // a janela pequena cabe na tela: folga normal
+    applyShape()
+    push()
+  }
   dragTimer = setInterval(() => {
     if (!win || win.isDestroyed() || !islandRect) return
     const c = screen.getCursorScreenPoint()
-    win.setPosition(Math.round(c.x - islandRect.x - islandRect.w / 2), Math.round(c.y - islandRect.y - PILL_H / 2))
+    const x = Math.round(c.x - islandRect.x - islandRect.w / 2)
+    const y = Math.round(c.y - islandRect.y - PILL_H / 2)
+    // Linux: setPosition com escala fracionaria faz o tamanho escorregar a cada passo.
+    if (dragSize) win.setBounds({ x, y, ...dragSize })
+    else win.setPosition(x, y)
   }, 16)
 }
 
@@ -543,6 +595,7 @@ function endDrag () {
   if (!dragTimer) return
   clearInterval(dragTimer)
   dragTimer = null
+  dragSize = null
   hoverInside = true // o cursor esta sobre a pilula que acabou de soltar
   dockFromDrop()
   placeWindow()
@@ -575,6 +628,10 @@ function createWindow () {
     focusable: true,
     alwaysOnTop: true,
     skipTaskbar: true,
+    // X11: como toolbar o KWin nao trata a ilha como janela comum, e ela nao
+    // fica pedindo atencao ao abrir sem foco. Fora da barra de tarefas so com a
+    // regra do KWin (tools/install-linux.sh): o Electron ignora skipTaskbar aqui.
+    ...(LINUX ? { type: 'toolbar' } : {}),
     show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -588,11 +645,20 @@ function createWindow () {
   win.setAlwaysOnTop(true, 'screen-saver')
   // A area transparente deixa o clique passar; o renderer liga a captura
   // so enquanto o mouse esta sobre a ilha.
-  win.setIgnoreMouseEvents(true)
+  // No Linux o pointer que atravessa a janela vai para apps Wayland, e o
+  // XWayland deixa de saber onde ele esta: em vez disso a janela recorta a
+  // propria forma para so a ilha existir (ver applyShape).
+  if (LINUX) win.setShape([{ x: 0, y: 0, width: 1, height: 1 }])
+  else win.setIgnoreMouseEvents(true)
   placeWindow()
 
   win.loadFile('index.html')
-  win.once('ready-to-show', () => { win.showInactive(); push() })
+  win.once('ready-to-show', () => {
+    win.showInactive()
+    // X11: mostrar sem foco deixa a janela pedindo atencao.
+    if (LINUX) setTimeout(() => win.flashFrame(false), 300)
+    push()
+  })
 
   win.on('close', e => {
     if (quitting) return
@@ -621,8 +687,25 @@ ipcMain.on('hide', () => { if (win) { win.hide(); updateTray() } })
 // O renderer informa onde a ilha esta dentro da janela, a cada mudanca de tamanho.
 let islandRect = null
 ipcMain.on('island-rect', (_e, r) => {
-  if (r && [r.x, r.y, r.w, r.h].every(Number.isFinite)) islandRect = r
+  if (r && [r.x, r.y, r.w, r.h].every(Number.isFinite)) {
+    islandRect = r
+    applyShape()
+  }
 })
+
+// Linux: a forma da janela e a ilha mais uma folga para a sombra. Fora dela o
+// clique cai direto na janela de baixo.
+const SHAPE_PAD = 16
+function applyShape () {
+  if (!LINUX || !win || win.isDestroyed() || !islandRect) return
+  const b = win.getBounds()
+  win.setShape([shapeRect(islandRect, b, SHAPE_PAD)])
+}
+
+// Linux: o preload avisa quando o pointer entra ou sai da janela. Fora dela o
+// XWayland devolve a ultima posicao conhecida, que nao serve para o hover.
+let pointerInWindow = false
+ipcMain.on('pointer-in-window', (_e, inside) => { pointerInWindow = !!inside })
 
 // Hover por consulta ao cursor: no Windows o encaminhamento de mousemove de
 // janela transparente atravessavel nao chega ao renderer. Fora da ilha o clique
@@ -635,11 +718,12 @@ function pollHover () {
   const c = screen.getCursorScreenPoint()
   const b = win.getBounds()
   const PAD = 2
-  const inside = c.x >= b.x + islandRect.x - PAD && c.x <= b.x + islandRect.x + islandRect.w + PAD &&
+  const inside = (!LINUX || pointerInWindow) &&
+                 c.x >= b.x + islandRect.x - PAD && c.x <= b.x + islandRect.x + islandRect.w + PAD &&
                  c.y >= b.y + islandRect.y - PAD && c.y <= b.y + islandRect.y + islandRect.h + PAD
   if (inside === hoverInside) return
   hoverInside = inside
-  win.setIgnoreMouseEvents(!inside)
+  if (!LINUX) win.setIgnoreMouseEvents(!inside)
   win.webContents.send('hover', inside)
 }
 
@@ -668,7 +752,9 @@ ipcMain.on('set-token-days', (_e, days) => {
 
 // ---------------------------------------------------------------- vida
 
-if (!app.requestSingleInstanceLock()) {
+if (NEEDS_X11) {
+  // ja saindo para relancar como X11
+} else if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
   app.on('second-instance', () => { if (win) { win.showInactive(); refreshStale(); updateTray() } })
@@ -679,6 +765,11 @@ if (!app.requestSingleInstanceLock()) {
     state = windowState.load(app)
     if (!BY_ID[state.source]) state.source = 'claude'
     PROVIDERS.forEach(loadCache)
+    // Linux: inicia com o sistema por padrao, uma vez. Desligar no menu fica valendo.
+    if (LINUX && !state.autostartSeen) {
+      setState({ autostartSeen: true })
+      if (!autostart.isOn()) setAutostart(true)
+    }
     createWindow()
 
     tray = new Tray(trayIcon('ok'))
@@ -691,7 +782,8 @@ if (!app.requestSingleInstanceLock()) {
 
     // Checa 1x na abertura, sem agendamento proprio: quem reabre o app no dia
     // seguinte ja cobre o ritmo de verificacao.
-    autoUpdater.checkForUpdatesAndNotify().catch(err => console.error('update:', err.message))
+    // So o instalador do Windows tem releases publicadas.
+    if (!LINUX) autoUpdater.checkForUpdatesAndNotify().catch(err => console.error('update:', err.message))
 
     const wake = () => refreshAll({ force: true })
     powerMonitor.on('resume', wake)
