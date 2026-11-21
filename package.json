@@ -15,7 +15,8 @@
     "autostart:status": "electron tools/autostart-cli.js --status",
     "empacotar": "node tools/pack.js",
     "dist": "electron-builder --win",
-    "release": "electron-builder --win --publish always"
+    "release": "electron-builder --win --publish always",
+    "dist:linux": "electron-builder --linux AppImage --publish never"
   },
   "devDependencies": {
     "electron": "43.2.0",
@@ -48,6 +49,18 @@
       "owner": "giovani-junior-dev",
       "repo": "claude-widget",
       "releaseType": "release"
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Utility",
+      "icon": "assets/icon.png",
+      "executableName": "claude-widget",
+      "artifactName": "Claude-Widget-${version}.AppImage",
+      "desktop": {
+        "entry": {
+          "StartupWMClass": "claude-widget"
+        }
+      }
     }
   },
   "dependencies": {
