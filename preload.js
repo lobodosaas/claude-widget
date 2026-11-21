@@ -2,6 +2,13 @@
 
 const { contextBridge, ipcRenderer } = require('electron')
 
+// Linux: o main precisa saber se o pointer esta dentro da janela (ver
+// pointer-in-window no main.js).
+if (process.platform === 'linux') {
+  window.addEventListener('mouseover', () => ipcRenderer.send('pointer-in-window', true))
+  window.addEventListener('mouseout', e => { if (!e.relatedTarget) ipcRenderer.send('pointer-in-window', false) })
+}
+
 // Ponte minima. Os tokens ficam no processo principal; para ca so atravessam
 // numeros, textos e uma severidade.
 contextBridge.exposeInMainWorld('claudeWidget', {

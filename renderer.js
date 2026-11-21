@@ -168,11 +168,19 @@ function fit () {
   island.dataset.o = orient()
   island.style.width = s.w + 'px'
   island.style.height = s.h + 'px'
+  // Folga ate a borda lateral: menor que INSET quando o Linux empurrou a janela
+  // para dentro da tela (ver fitInside no main). Inline sobrepoe o CSS.
+  const pad = Number.isFinite(a.pad) ? a.pad : INSET
+  island.style.left = a.h === 'left' ? pad + 'px' : ''
+  island.style.right = a.h === 'right' ? pad + 'px' : ''
   // Tamanho-alvo, nao o da animacao: o hover ja vale para onde a ilha vai chegar.
-  const x = a.h === 'left' ? INSET : a.h === 'right' ? window.innerWidth - INSET - s.w : (window.innerWidth - s.w) / 2
+  const x = a.h === 'left' ? pad : a.h === 'right' ? window.innerWidth - pad - s.w : (window.innerWidth - s.w) / 2
   const y = a.v === 'bottom' ? window.innerHeight - INSET - s.h : 0
   api.reportRect({ x: Math.round(x), y: Math.round(y), w: s.w, h: s.h })
 }
+
+// A janela muda de tamanho no arrasto do Linux: a ilha se reposiciona.
+window.addEventListener('resize', fit)
 
 function setMode (m) {
   if (m === mode) return
